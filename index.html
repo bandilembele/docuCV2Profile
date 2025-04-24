@@ -1,0 +1,37 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>CV Extractor</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <div class="container">
+    <h1>Upload Your CV</h1>
+    <form id="uploadForm">
+      <div class="upload-area">
+        <label for="cvInput" class="file-label">
+          <span class="upload-icon">📄</span>
+          <span class="upload-text">Choose a file or drag it here</span>
+          <span class="file-types">(DOCX, PDF, or Image)</span>
+        </label>
+        <input type="file" id="cvInput" accept=".docx,.pdf,.jpg,.jpeg,.png,.tiff" class="file-input" />
+      </div>
+      <button type="submit" class="submit-btn">Upload CV</button>
+    </form>
+    <div id="status" class="status-message">Waiting for upload...</div>
+    <div id="formContainer"></div>
+    <button id="downloadBtn" class="download-btn" style="display:none;">Download Final CV</button>
+  </div>
+
+  <!-- Load libraries -->
+  <script src="https://unpkg.com/tesseract.js@v2.1.0/dist/tesseract.min.js"></script>
+  <script src="libs/mammoth.browser.min.js"></script>
+  <script src="libs/pdf.min.js"></script>
+  <script>
+    // Set PDF.js worker path
+    pdfjsLib.GlobalWorkerOptions.workerSrc = 'libs/pdf.worker.min.js';
+  </script>
+  <script src="script.js"></script>
+</body>
+</html>
