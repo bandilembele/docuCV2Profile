@@ -6,8 +6,7 @@ const formContainer = document.getElementById('formContainer');
 const downloadBtn = document.getElementById('downloadBtn');
 
 // Add API configuration at the top
-const GOOGLE_API_KEY = 'YOUR_GOOGLE_CLOUD_API_KEY';
-const GOOGLE_API_URL = 'https://language.googleapis.com/v1/documents:analyzeEntities';
+
 
 // Add Tesseract.js configuration
 const TESSERACT_WORKER_PATH = 'https://unpkg.com/tesseract.js@v2.1.0/dist/worker.min.js';
@@ -62,7 +61,9 @@ let cvData = {
 
 // DocuPanda API configuration
 const DOCUPANDA_API_KEY = 'GLnaFU5O7xf6DEykYH3RF5HE7J32';
-const DOCUPANDA_API_URL = 'https://api.docupanda.ai/v1/extract';
+const DOCUPANDA_API_URL = 'https://app.docupanda.io/document';
+const POLLING_INTERVAL = 2000; // 2 seconds
+const MAX_POLLING_ATTEMPTS = 30; // 1 minute maximum
 
 // Handle form submission
 uploadForm.addEventListener('submit', async (e) => {
@@ -75,22 +76,12 @@ uploadForm.addEventListener('submit', async (e) => {
   }
 
   try {
-    updateStatus('Processing file...', 'processing');
-    let text;
-
-    // Extract text based on file type
-    if (file.type.startsWith('image/')) {
-      text = await handleImageUpload(file);
-    } else if (file.type === 'application/pdf') {
-      text = await extractTextFromPDF(file);
-    } else if (file.type === 'application/vnd.openxmlformats-officedocument.wordprocessingml.document') {
-      text = await extractTextFromDOCX(file);
-    } else {
-      throw new Error('Unsupported file type');
-    }
-
-    // Send to DocuPanda API
-    const extractedData = await analyzeCVWithAI(text);
+    updateStatus('Uploading document...', 'processing');
+    
+    // Send file to DocuPanda API
+    const extractedData = await analyzeCVWithAI(file);
+    
+    // Display the extracted data
     displayExtractedData(extractedData);
     updateStatus('CV processed successfully!', 'success');
     downloadBtn.style.display = 'block';
@@ -242,30 +233,19 @@ async function handleImageUpload(file) {
 }
 
 // Enhanced CV analysis function
-async function analyzeCVWithAI(cvData) {
+async function analyzeCVWithAI(file) {
     try {
+        // Create FormData for file upload
+        const formData = new FormData();
+        formData.append('file', file);
+
+        // Make the initial POST request to start processing
         const response = await fetch(DOCUPANDA_API_URL, {
             method: 'POST',
             headers: {
-                'Content-Type': 'application/json',
-                'Authorization': `Bearer ${DOCUPANDA_API_KEY}`
+                'X-API-Key': DOCUPANDA_API_KEY
             },
-            body: JSON.stringify({
-                content: cvData,
-                type: 'text',
-                extract_fields: [
-                    'full_name',
-                    'email',
-                    'phone',
-                    'location',
-                    'summary',
-                    'education',
-                    'experience',
-                    'skills',
-                    'certifications',
-                    'projects'
-                ]
-            })
+            body: formData
         });
 
         if (!response.ok) {
@@ -275,139 +255,288 @@ async function analyzeCVWithAI(cvData) {
 
         const result = await response.json();
         
-        // Transform the result into the expected format
-        return {
-            personalInfo: {
-                fullName: result.full_name || '',
-                email: result.email || '',
-                phone: result.phone || '',
-                location: result.location || '',
-                summary: result.summary || ''
-            },
-            education: result.education || [],
-            experience: result.experience || [],
-            skills: {
-                technical: result.skills?.technical || [],
-                soft: result.skills?.soft || [],
-                languages: result.skills?.languages || [],
-                tools: result.skills?.tools || []
-            },
-            certifications: result.certifications || [],
-            projects: result.projects || []
-        };
+        // Check if we got a document ID
+        if (!result.documentId) {
+            throw new Error('No document ID received from API');
+        }
+
+        // Start polling for results
+        return await pollForResults(result.documentId);
     } catch (error) {
         console.error('AI analysis error:', error);
         throw error;
     }
 }
 
+// Add progress bar styles
+const style = document.createElement('style');
+style.textContent = `
+    /* Loading spinner styles */
+    .loading-spinner {
+        display: inline-block;
+        width: 20px;
+        height: 20px;
+        border: 3px solid rgba(0, 0, 0, 0.1);
+        border-radius: 50%;
+        border-top-color: #007bff;
+        animation: spin 1s ease-in-out infinite;
+        margin-right: 10px;
+        vertical-align: middle;
+    }
+
+    @keyframes spin {
+        to { transform: rotate(360deg); }
+    }
+
+    /* Progress bar styles */
+    .progress-container {
+        width: 100%;
+        background-color: #f1f1f1;
+        border-radius: 4px;
+        margin: 10px 0;
+    }
+
+    .progress-bar {
+        height: 20px;
+        background-color: #4CAF50;
+        border-radius: 4px;
+        width: 0%;
+        transition: width 0.3s ease-in-out;
+    }
+
+    .progress-text {
+        text-align: center;
+        margin-top: 5px;
+        font-size: 14px;
+        color: #666;
+    }
+
+    .time-remaining {
+        font-size: 12px;
+        color: #666;
+        margin-top: 5px;
+    }
+
+    /* Status message styles */
+    .status-message {
+        padding: 10px;
+        margin: 10px 0;
+        border-radius: 4px;
+    }
+
+    .status-message.processing {
+        background-color: #e3f2fd;
+        color: #0d47a1;
+    }
+
+    .status-message.success {
+        background-color: #e8f5e9;
+        color: #2e7d32;
+    }
+
+    .status-message.error {
+        background-color: #ffebee;
+        color: #c62828;
+    }
+
+    /* Refresh button styles */
+    .refresh-btn {
+        position: fixed;
+        top: 20px;
+        right: 20px;
+        padding: 10px 20px;
+        background-color: #ff4444;
+        color: white;
+        border: none;
+        border-radius: 5px;
+        cursor: pointer;
+        font-size: 16px;
+        transition: background-color 0.3s;
+    }
+    
+    .refresh-btn:hover {
+        background-color: #cc0000;
+    }
+    
+    /* Confirmation dialog styles */
+    .confirmation-dialog {
+        position: fixed;
+        top: 50%;
+        left: 50%;
+        transform: translate(-50%, -50%);
+        background-color: white;
+        padding: 20px;
+        border-radius: 5px;
+        box-shadow: 0 2px 10px rgba(0, 0, 0, 0.1);
+        z-index: 1000;
+        text-align: center;
+    }
+    
+    .confirmation-dialog button {
+        margin: 10px;
+        padding: 8px 16px;
+        border: none;
+        border-radius: 4px;
+        cursor: pointer;
+    }
+    
+    .confirmation-dialog .confirm-btn {
+        background-color: #ff4444;
+        color: white;
+    }
+    
+    .confirmation-dialog .cancel-btn {
+        background-color: #666;
+        color: white;
+    }
+    
+    .overlay {
+        position: fixed;
+        top: 0;
+        left: 0;
+        right: 0;
+        bottom: 0;
+        background-color: rgba(0, 0, 0, 0.5);
+        z-index: 999;
+    }
+`;
+document.head.appendChild(style);
+
+// Function to update progress
+function updateProgress(attempts, maxAttempts) {
+    const progress = (attempts / maxAttempts) * 100;
+    const timeRemaining = Math.max(0, Math.ceil((maxAttempts - attempts) * (POLLING_INTERVAL / 1000)));
+    
+    const statusDiv = document.getElementById('status');
+    statusDiv.innerHTML = `
+        <div class="loading-spinner"></div>
+        <div>Processing document...</div>
+        <div class="progress-container">
+            <div class="progress-bar" style="width: ${progress}%"></div>
+        </div>
+        <div class="progress-text">${Math.round(progress)}% complete</div>
+        <div class="time-remaining">Estimated time remaining: ${timeRemaining} seconds</div>
+    `;
+}
+
+// Function to poll for results
+async function pollForResults(documentId) {
+    let attempts = 0;
+    
+    while (attempts < MAX_POLLING_ATTEMPTS) {
+        try {
+            // Update progress
+            updateProgress(attempts, MAX_POLLING_ATTEMPTS);
+
+            // Make GET request to check document status
+            const response = await fetch(`${DOCUPANDA_API_URL}/${documentId}`, {
+                method: 'GET',
+                headers: {
+                    'accept': 'application/json',
+                    'X-API-Key': DOCUPANDA_API_KEY
+                }
+            });
+
+            if (!response.ok) {
+                throw new Error(`HTTP error! status: ${response.status}`);
+            }
+
+            const result = await response.json();
+            
+            // Check if we have the extracted data
+            if (result.data) {
+                return result.data; // Return the extracted data
+            } else if (result.error) {
+                throw new Error(result.error);
+            }
+
+            // Wait before next poll
+            await new Promise(resolve => setTimeout(resolve, POLLING_INTERVAL));
+            attempts++;
+        } catch (error) {
+            console.error('Polling error:', error);
+            throw error;
+        }
+    }
+
+    throw new Error('Maximum polling attempts reached');
+}
+
 // Function to display extracted CV data
 function displayExtractedData(data) {
     const formContainer = document.getElementById('formContainer');
-    formContainer.innerHTML = `
-        <div class="cv-section">
-            <h2>Personal Information</h2>
-            <div class="info-card">
-                <p><strong>Name:</strong> ${data.full_name || 'Not found'}</p>
-                <p><strong>Email:</strong> ${data.email || 'Not found'}</p>
-                <p><strong>Phone:</strong> ${data.phone || 'Not found'}</p>
-                <p><strong>Location:</strong> ${data.location || 'Not found'}</p>
-                <p><strong>Summary:</strong> ${data.summary || 'Not found'}</p>
-            </div>
-        </div>
-
-        <div class="cv-section">
-            <h2>Education</h2>
-            <div class="info-card">
-                ${data.education ? data.education.map(edu => `
-                    <div class="education-item">
-                        <p><strong>Institution:</strong> ${edu.institution || 'Not found'}</p>
-                        <p><strong>Degree:</strong> ${edu.degree || 'Not found'}</p>
-                        <p><strong>Field:</strong> ${edu.field || 'Not found'}</p>
-                        <p><strong>Duration:</strong> ${edu.start_date || 'Not found'} - ${edu.end_date || 'Present'}</p>
-                        <p><strong>Description:</strong> ${edu.description || 'Not found'}</p>
-                    </div>
-                `).join('') : '<p>No education information found</p>'}
-            </div>
-        </div>
-
-        <div class="cv-section">
-            <h2>Experience</h2>
-            <div class="info-card">
-                ${data.experience ? data.experience.map(exp => `
-                    <div class="experience-item">
-                        <p><strong>Company:</strong> ${exp.company || 'Not found'}</p>
-                        <p><strong>Position:</strong> ${exp.position || 'Not found'}</p>
-                        <p><strong>Duration:</strong> ${exp.start_date || 'Not found'} - ${exp.end_date || 'Present'}</p>
-                        <p><strong>Location:</strong> ${exp.location || 'Not found'}</p>
-                        <p><strong>Description:</strong> ${exp.description || 'Not found'}</p>
-                        ${exp.achievements ? `
-                            <div class="achievements">
-                                <strong>Achievements:</strong>
-                                <ul>
-                                    ${exp.achievements.map(achievement => `<li>${achievement}</li>`).join('')}
-                                </ul>
-                            </div>
-                        ` : ''}
-                    </div>
-                `).join('') : '<p>No experience information found</p>'}
-            </div>
-        </div>
-
-        <div class="cv-section">
-            <h2>Skills</h2>
-            <div class="info-card">
-                ${data.skills ? `
-                    <div class="skills-grid">
-                        ${Object.entries(data.skills).map(([category, skills]) => `
-                            <div class="skill-category">
-                                <h3>${category}</h3>
-                                <ul>
-                                    ${skills.map(skill => `<li>${skill}</li>`).join('')}
-                                </ul>
-                            </div>
-                        `).join('')}
-                    </div>
-                ` : '<p>No skills information found</p>'}
-            </div>
-        </div>
-
-        <div class="cv-section">
-            <h2>Certifications</h2>
-            <div class="info-card">
-                ${data.certifications ? data.certifications.map(cert => `
-                    <div class="certification-item">
-                        <p><strong>Name:</strong> ${cert.name || 'Not found'}</p>
-                        <p><strong>Issuer:</strong> ${cert.issuer || 'Not found'}</p>
-                        <p><strong>Date:</strong> ${cert.date || 'Not found'}</p>
-                        <p><strong>Description:</strong> ${cert.description || 'Not found'}</p>
-                    </div>
-                `).join('') : '<p>No certifications found</p>'}
-            </div>
-        </div>
-
-        <div class="cv-section">
-            <h2>Projects</h2>
-            <div class="info-card">
-                ${data.projects ? data.projects.map(project => `
-                    <div class="project-item">
-                        <p><strong>Name:</strong> ${project.name || 'Not found'}</p>
-                        <p><strong>Role:</strong> ${project.role || 'Not found'}</p>
-                        <p><strong>Duration:</strong> ${project.duration || 'Not found'}</p>
-                        <p><strong>Description:</strong> ${project.description || 'Not found'}</p>
-                        ${project.technologies ? `
-                            <div class="technologies">
-                                <strong>Technologies:</strong>
-                                <ul>
-                                    ${project.technologies.map(tech => `<li>${tech}</li>`).join('')}
-                                </ul>
-                            </div>
-                        ` : ''}
-                    </div>
-                `).join('') : '<p>No projects found</p>'}
-            </div>
-        </div>
-    `;
+    
+    // Clear previous content
+    formContainer.innerHTML = '';
+    
+    // Display each section from the API response
+    for (const [section, content] of Object.entries(data)) {
+        const sectionDiv = document.createElement('div');
+        sectionDiv.className = 'cv-section';
+        
+        // Create section header
+        const header = document.createElement('h2');
+        header.textContent = section.charAt(0).toUpperCase() + section.slice(1).replace(/_/g, ' ');
+        sectionDiv.appendChild(header);
+        
+        // Create content container
+        const contentDiv = document.createElement('div');
+        contentDiv.className = 'info-card';
+        
+        if (Array.isArray(content)) {
+            // Handle array content (like education, experience, etc.)
+            content.forEach(item => {
+                const itemDiv = document.createElement('div');
+                itemDiv.className = 'info-item';
+                
+                for (const [key, value] of Object.entries(item)) {
+                    const fieldDiv = document.createElement('div');
+                    fieldDiv.className = 'field';
+                    
+                    const label = document.createElement('strong');
+                    label.textContent = key.charAt(0).toUpperCase() + key.slice(1).replace(/_/g, ' ') + ': ';
+                    
+                    const valueSpan = document.createElement('span');
+                    valueSpan.className = 'editable';
+                    valueSpan.textContent = value || 'Not specified';
+                    valueSpan.onclick = () => makeEditable(valueSpan);
+                    
+                    fieldDiv.appendChild(label);
+                    fieldDiv.appendChild(valueSpan);
+                    itemDiv.appendChild(fieldDiv);
+                }
+                
+                contentDiv.appendChild(itemDiv);
+            });
+        } else if (typeof content === 'object') {
+            // Handle object content (like personal info, skills, etc.)
+            for (const [key, value] of Object.entries(content)) {
+                const fieldDiv = document.createElement('div');
+                fieldDiv.className = 'field';
+                
+                const label = document.createElement('strong');
+                label.textContent = key.charAt(0).toUpperCase() + key.slice(1).replace(/_/g, ' ') + ': ';
+                
+                const valueSpan = document.createElement('span');
+                valueSpan.className = 'editable';
+                valueSpan.textContent = value || 'Not specified';
+                valueSpan.onclick = () => makeEditable(valueSpan);
+                
+                fieldDiv.appendChild(label);
+                fieldDiv.appendChild(valueSpan);
+                contentDiv.appendChild(fieldDiv);
+            }
+        } else {
+            // Handle simple values
+            const valueDiv = document.createElement('div');
+            valueDiv.className = 'field';
+            valueDiv.textContent = content;
+            contentDiv.appendChild(valueDiv);
+        }
+        
+        sectionDiv.appendChild(contentDiv);
+        formContainer.appendChild(sectionDiv);
+    }
 }
 
 // Display CV data in editable cards
@@ -477,7 +606,7 @@ function displayCVData() {
                 <div class="skills-grid">
                     ${Object.entries(cvData.skills).map(([category, skills]) => `
                         <div class="skill-category">
-                            <h3>${category.charAt(0).toUpperCase() + category.slice(1)} Skills</h3>
+                            <h3>${category}</h3>
                             <ul>
                                 ${skills.map(skill => `
                                     <li>
@@ -664,6 +793,14 @@ downloadBtn.addEventListener('click', () => {
 function updateStatus(message, type) {
   statusDiv.textContent = message;
   statusDiv.className = `status-message ${type}`;
+  
+  // Add loading spinner for processing status
+  if (type === 'processing') {
+    statusDiv.innerHTML = `
+      <div class="loading-spinner"></div>
+      <span>${message}</span>
+    `;
+  }
 }
 
 // Add AI-powered suggestions function
@@ -779,5 +916,97 @@ function copyText(text) {
     }).catch(err => {
         console.error('Failed to copy text: ', err);
     });
+}
+
+// Add refresh button to the container
+const container = document.querySelector('.container');
+const refreshButton = document.createElement('button');
+refreshButton.id = 'refreshBtn';
+refreshButton.className = 'refresh-btn';
+refreshButton.textContent = 'Start New CV';
+container.appendChild(refreshButton);
+
+// Add refresh functionality
+refreshButton.addEventListener('click', () => {
+  // Check if there's any data to lose
+  if (Object.keys(cvData).length > 0) {
+    showConfirmationDialog();
+  } else {
+    refreshPage();
+  }
+});
+
+function showConfirmationDialog() {
+  const overlay = document.createElement('div');
+  overlay.className = 'overlay';
+  
+  const dialog = document.createElement('div');
+  dialog.className = 'confirmation-dialog';
+  dialog.innerHTML = `
+    <h3>Start New CV</h3>
+    <p>Are you sure you want to start a new CV? All current data will be lost.</p>
+    <button class="confirm-btn">Yes, Start New</button>
+    <button class="cancel-btn">Cancel</button>
+  `;
+  
+  document.body.appendChild(overlay);
+  document.body.appendChild(dialog);
+  
+  dialog.querySelector('.confirm-btn').addEventListener('click', () => {
+    refreshPage();
+    document.body.removeChild(overlay);
+    document.body.removeChild(dialog);
+  });
+  
+  dialog.querySelector('.cancel-btn').addEventListener('click', () => {
+    document.body.removeChild(overlay);
+    document.body.removeChild(dialog);
+  });
+}
+
+function refreshPage() {
+  // Clear the form container
+  formContainer.innerHTML = '';
+  
+  // Reset the CV data
+  cvData = {
+    personalInfo: {
+      fullName: '',
+      email: '',
+      phone: '',
+      location: '',
+      summary: ''
+    },
+    education: [],
+    experience: [],
+    skills: {
+      technical: [],
+      soft: [],
+      languages: [],
+      tools: []
+    },
+    certifications: [],
+    projects: []
+  };
+  
+  // Reset the upload form
+  document.querySelector('.upload-area').style.display = 'block';
+  document.querySelector('.submit-btn').style.display = 'block';
+  cvInput.value = '';
+  
+  // Hide the download button
+  downloadBtn.style.display = 'none';
+  
+  // Reset status message
+  updateStatus('Waiting for upload...', '');
+  
+  // Clear any existing file info
+  const existingInfo = document.querySelector('.uploaded-file-info');
+  if (existingInfo) {
+    existingInfo.remove();
+  }
+  
+  // Clear localStorage
+  localStorage.removeItem('lastUploadedCV');
 }
   
