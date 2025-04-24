@@ -1,0 +1,13 @@
+{
+  "name": "cv-profile",
+  "version": "1.0.0",
+  "description": "CV Profile Extractor",
+  "main": "script.js",
+  "scripts": {
+    "build": "echo 'No build step required'",
+    "start": "serve ."
+  },
+  "dependencies": {
+    "serve": "^14.2.1"
+  }
+} 
